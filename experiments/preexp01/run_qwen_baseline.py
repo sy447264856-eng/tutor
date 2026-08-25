@@ -41,6 +41,7 @@ AutoModelForCausalLM.generate() 调用 Qwen，且严格贪心解码
 """
 
 import argparse
+import copy
 import json
 import logging
 import subprocess
@@ -57,6 +58,18 @@ LONGTUTOR_DATA = LONGTUTOR_ROOT / "data" / "XES3G5M"
 ARTIFACTS_DIR = REPO_ROOT / "artifacts" / "preexp01"
 FEATURES_PATH = ARTIFACTS_DIR / "history_features_lastq.jsonl"
 GOLD_PATH = LONGTUTOR_DATA / "human_an_updated.jsonl"
+
+if not (LONGTUTOR_SCRIPTS / "eval_ai_tutor.py").exists():
+    raise RuntimeError(
+        f"未找到 {LONGTUTOR_SCRIPTS / 'eval_ai_tutor.py'}"
+        f"（本文件推算出的项目根目录是 {REPO_ROOT}，推算方式：Path(__file__).resolve().parents[2]）。\n"
+        "最常见原因：third_party/LongTutor 这个 git submodule 还没有被检出（目录存在但是空的）。"
+        "请在仓库根目录运行：\n"
+        "    git submodule update --init --recursive\n"
+        "如果上面打印的 REPO_ROOT 本身就不是你的 tutor 仓库根目录，说明这个脚本文件当前所在的"
+        "实际磁盘路径不是 <仓库根目录>/experiments/preexp01/run_qwen_baseline.py"
+        "（例如 clone 出现了嵌套/重复的目录），请检查 clone 结构，而不是继续往下跑。"
+    )
 
 sys.path.insert(0, str(LONGTUTOR_SCRIPTS))
 
@@ -121,6 +134,38 @@ def _align_memory(parsed: dict, mem_queries: list) -> list:
     return aligned
 
 
+def limit_history(sample: dict, history_length: int):
+    """在调用官方 `_build_prompts` 之前，把喂给 prompt 的 history_info 限制为
+    最近 history_length 条。
+
+    - 只裁剪 `history_info`（官方 `_build_prompts` 默认 history_mode="long" 时，
+      正是用这个字段渲染历史文本块；`related_history` 是按知识点筛选出来的另一
+      个字段，语义不是"最近 N 条"，本函数不动它）。
+    - 保留原始时间顺序：history_info 本身已经按时间升序排列，直接取列表末尾的
+      N 条即为"最近 N 条，原始顺序不变"。
+    - 不修改每条记录的文本内容，不做任何 token 级截断——只是减少喂进去的
+      记录条数。
+    - history_length <= 0 或 >= 实际条数时视为不截断，使用全部历史（避免用一个
+      看似合理的默认值悄悄丢数据）。
+
+    返回 (处理后的 sample 副本, original_history_records, used_history_records)。
+    """
+    history_info = sample.get("history_info") or []
+    original_count = len(history_info)
+
+    if history_length is None or history_length <= 0 or history_length >= original_count:
+        used_history = history_info
+    else:
+        used_history = history_info[-history_length:]
+
+    # 用 deepcopy 而不是浅拷贝，确保 limited_sample 不与原始 sample 共享任何
+    # 可变对象的引用（即便 history_info 目前只是字符串列表、浅拷贝本身不会
+    # 造成实际问题，这里仍按要求做成完全独立的拷贝，逻辑不变）。
+    limited_sample = copy.deepcopy(sample)
+    limited_sample["history_info"] = copy.deepcopy(used_history)
+    return limited_sample, original_count, len(used_history)
+
+
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=(
@@ -136,6 +181,13 @@ def build_argparser() -> argparse.ArgumentParser:
                           "可用本参数按需调大）")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--output-dir", type=str, default=str(ARTIFACTS_DIR / "qwen_baseline_smoke"))
+    ap.add_argument("--history-length", type=int, default=100,
+                     help="喂给 prompt 的 history_info 只保留最近 N 条记录（默认 100，"
+                          "对应论文 Appendix H 的标准协议 L=100；官方发布的 "
+                          "history_features_lastq.jsonl 里 history_info 实际是全量 199 条，"
+                          "不做任何截断）。保持原始时间顺序，不改动每条记录的内容，不做 token "
+                          "级截断，只是从列表末尾（最近）取 N 条。设为 <=0 或 >= 实际条数则不截断，"
+                          "使用全部历史。")
     ap.add_argument("--sdpa-backend", type=str, choices=["auto", "efficient"], default="auto",
                      help="auto：不干预，使用 PyTorch SDPA 默认调度；"
                           "efficient：在 model.generate() 外层用 torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION) "
@@ -428,12 +480,23 @@ def generate_local(
 
 def process_one_sample_local(
     model, tokenizer, sample: dict, test_obj: dict, max_new_tokens: int, stage_tracker: dict,
-    arch_info: dict, sdpa_backend: str, logger: logging.Logger,
+    arch_info: dict, sdpa_backend: str, logger: logging.Logger, history_length: int,
 ) -> dict:
     stage_tracker["stage"] = "build_prompt"
     mem_queries = official_extract_mem_queries(test_obj)
+
+    limited_sample, original_history_records, used_history_records = limit_history(sample, history_length)
+    # 也存进 stage_tracker：如果后面 generate 阶段异常（例如 OOM），main() 的
+    # except 分支拿不到这个函数的返回值，但可以从 stage_tracker 里补上这两个数。
+    stage_tracker["history_counts"] = (original_history_records, used_history_records)
+    logger.info(
+        f"[history] uid={sample.get('uid')} original_history_records={original_history_records} "
+        f"used_history_records={used_history_records} history_length_arg={history_length}"
+    )
+
     # 与官方 process_one_sample 默认调用完全一致：history_mode="long", use_feature=False, use_teach=False
-    system_prompt, user_prompt = official_build_prompts(sample, test_obj)
+    # （只是喂进去的 sample 换成了按 --history-length 截取过 history_info 的版本）
+    system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj)
     messages = build_messages(system_prompt=system_prompt, user_prompt=user_prompt)
 
     raw_text, in_tok, out_tok, elapsed = generate_local(
@@ -484,11 +547,19 @@ def process_one_sample_local(
         "output_token_count": out_tok,
         "elapsed_seconds": round(elapsed, 3),
         "diagnostics": stage_tracker.get("diagnostics"),
+        "original_history_records": original_history_records,
+        "used_history_records": used_history_records,
     }
 
 
-def run_dry_check(samples, tests_map, logger: logging.Logger) -> int:
-    """不加载模型的静态检查：数据读取 / sample key 对齐 / prompt 构造是否正常。"""
+def run_dry_check(samples, tests_map, history_length: int, logger: logging.Logger) -> int:
+    """不加载模型的静态检查：数据读取 / sample key 对齐 / prompt 构造是否正常。
+
+    与正式推理路径（process_one_sample_local）共用同一个 limit_history 函数，
+    所以这里打印出的 original_history_records / used_history_records /
+    user_prompt_chars 反映的是真实会喂给模型的那份 prompt，不是仍然基于全量
+    199 条历史算出来的。全程不 import torch/transformers，不下载 tokenizer。
+    """
     n_ok = 0
     for idx, sample in samples:
         key = official_sample_key(sample)
@@ -497,10 +568,13 @@ def run_dry_check(samples, tests_map, logger: logging.Logger) -> int:
             logger.error(f"[dry-run] index={idx} uid={sample.get('uid')} 未在 human_an_updated.jsonl 中找到对应 key，跳过")
             continue
         mem_queries = official_extract_mem_queries(test_obj)
-        system_prompt, user_prompt = official_build_prompts(sample, test_obj)
+
+        limited_sample, original_history_records, used_history_records = limit_history(sample, history_length)
+        system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj)
         logger.info(
             f"[dry-run] index={idx} uid={sample.get('uid')} sample_key={key} "
-            f"mem_queries={len(mem_queries)} "
+            f"original_history_records={original_history_records} used_history_records={used_history_records} "
+            f"history_length_arg={history_length} mem_queries={len(mem_queries)} "
             f"system_prompt_chars={len(system_prompt)} user_prompt_chars={len(user_prompt)}"
         )
         n_ok += 1
@@ -533,7 +607,7 @@ def main() -> int:
                 f"Gold 测试用例共 {len(tests_map)} 条")
 
     if args.dry_run:
-        return run_dry_check(samples, tests_map, logger)
+        return run_dry_check(samples, tests_map, args.history_length, logger)
 
     run_started_at = datetime.now(timezone.utc).isoformat()
 
@@ -598,11 +672,11 @@ def main() -> int:
                 n_fail += 1
                 continue
 
-            stage_tracker = {"stage": "init", "diagnostics": None}
+            stage_tracker = {"stage": "init", "diagnostics": None, "history_counts": (None, None)}
             try:
                 result = process_one_sample_local(
                     model, tokenizer, sample, test_obj, args.max_new_tokens, stage_tracker,
-                    arch_info, args.sdpa_backend, logger,
+                    arch_info, args.sdpa_backend, logger, args.history_length,
                 )
                 row = {
                     "sample_index": idx,
@@ -614,6 +688,7 @@ def main() -> int:
             except Exception as e:
                 tb = traceback.format_exc()
                 failed_stage = stage_tracker.get("stage", "unknown")
+                orig_hist, used_hist = stage_tracker.get("history_counts", (None, None))
                 row = {
                     "sample_index": idx,
                     "sample_key": key,
@@ -634,6 +709,10 @@ def main() -> int:
                     # 即使在 generate 阶段 OOM，move_inputs 阶段已经算好的诊断信息
                     # 也会保留在这里，不会因为异常而丢失。
                     "diagnostics": stage_tracker.get("diagnostics"),
+                    # history 截取发生在 build_prompt 阶段，比 generate 更早，所以
+                    # 即使 generate 阶段 OOM，这两个数也几乎总是已经算出来了。
+                    "original_history_records": orig_hist,
+                    "used_history_records": used_hist,
                 }
                 success = False
                 logger.error(
@@ -666,6 +745,12 @@ def main() -> int:
         "max_new_tokens": args.max_new_tokens,
         "sample_size": args.sample_size,
         "start_index": args.start_index,
+        # 本次实验实际请求"最近 N 条历史"的 N。history_length_requested 是原始 CLI
+        # 输入值；history_length 是本次实际生效的值——目前两者总是相同（脚本没有
+        # 任何会二次覆盖这个数的逻辑），分别记录是为了以后如果加了自动降级之类的
+        # 逻辑，也不会丢掉"用户原始请求的是多少"这个信息。
+        "history_length_requested": args.history_length,
+        "history_length": args.history_length,
         "dataset": "XES3G5M / LongTutor-Gold (human_an_updated.jsonl) via history_features_lastq.jsonl",
         "longtutor_commit": _git_commit(LONGTUTOR_ROOT),
         "torch_version": torch.__version__,
