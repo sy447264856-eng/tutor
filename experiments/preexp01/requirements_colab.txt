@@ -1,0 +1,14 @@
+# Qwen2.5-7B-Instruct baseline smoke test（run_qwen_baseline.py）专用依赖。
+#
+# 不重复列出 third_party/LongTutor/requirements.txt 中已有的依赖
+# （openai / tqdm / rouge-score / numpy / scipy / scikit-learn / matplotlib / seaborn），
+# 那些请通过 `pip install -r third_party/LongTutor/requirements.txt` 单独安装
+# （run_qwen_baseline.py 通过 import 复用官方 prompt/schema，间接依赖其中的 openai、tqdm）。
+#
+# 不在此固定 torch 版本：Colab 自带与其 CUDA 驱动匹配的 torch，
+# 覆盖安装容易破坏 GPU 可用性；只在没有可用 torch 的环境中自行安装
+# 与本机 CUDA 版本匹配的 torch。
+
+transformers>=4.46.0
+accelerate>=0.34.0
+bitsandbytes>=0.43.3

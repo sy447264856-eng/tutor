@@ -171,6 +171,86 @@ python experiments/preexp01/prepare_longtutor_gold.py
 
 完整字段级检查结果见 [artifacts/preexp01/data_check.json](../../artifacts/preexp01/data_check.json)（该文件已提交到仓库；同目录下的 `history_features_lastq.jsonl` 为可重复生成的大文件，未提交，需要时按上方命令本地重新生成）。
 
+## 11. Qwen baseline smoke test（本地 HuggingFace 推理，仅 5 条）
+
+脚本：[experiments/preexp01/run_qwen_baseline.py](run_qwen_baseline.py)
+依赖：[experiments/preexp01/requirements_colab.txt](requirements_colab.txt)
+
+**目的**：在 Google Colab Tesla T4（约 15GB 显存）上，用官方 LongTutor 的
+prompt 与输出 schema，跑通"长期历史 + 当前题 → Qwen2.5-7B-Instruct baseline"
+这条链路的 5 条 smoke test。不涉及 Student State Model / CAD / ECD / Decoder，
+不做 200 条正式采样。
+
+**Prompt 复用方式**：直接 `import`
+`third_party/LongTutor/scripts/eval_ai_tutor.py` 的
+`_build_prompts` / `_validate_output` / `_extract_mem_queries_from_test_obj` /
+`_load_tests_map`，调用方式与官方 `process_one_sample` 默认一致
+（`history_mode="long"`, `use_feature=False`, `use_teach=False`）；同时
+`import` `gpt_memory_diagnose._sample_key` 和 `openai_helper.build_messages` /
+`extract_json`。**不修改** third_party 中的任何文件，不自行改写或"优化" prompt。
+唯一差异：官方通过 OpenAI 兼容 API 调用远程模型，本脚本用本地
+`AutoModelForCausalLM.generate()` 调用 Qwen；贪心解码（`do_sample=False`）下
+重试不会改变输出，因此本脚本对每条样本只生成一次，不复刻官方那套"多次重试
+换取不同采样结果"的循环。
+
+**官方输出 schema**（原样保留，未新增/未臆造字段）：
+```json
+{
+  "memory": [{"id": "Q1", "answer": "..."}, {"id": "Q2", "answer": "..."}, {"id": "Q3", "answer": "..."}],
+  "diagnosis": "Recall Failure / Conceptual Gap / Procedural Error / Transfer Deficit 之一",
+  "reason": "...",
+  "strategy": "与 diagnosis 对应的策略",
+  "content": "..."
+}
+```
+官方 schema 中没有独立的 "evidence" 字段；`memory` 本身就是证据式问答列表。
+
+### Colab 命令（假设已 `git clone` 并 `git submodule update --init --recursive`）
+
+```bash
+# 1. 安装依赖（LongTutor 官方依赖 + 本步骤新增依赖，不重复安装相同的包）
+pip install -r third_party/LongTutor/requirements.txt
+pip install -r experiments/preexp01/requirements_colab.txt
+
+# 2. 如果 artifacts/preexp01/history_features_lastq.jsonl 不存在，先生成它
+#    （脚本不会静默重新生成，缺失时会明确报错并提示这条命令）
+python experiments/preexp01/prepare_longtutor_gold.py
+
+# 3. 跑 5 条 Qwen2.5-7B-Instruct baseline smoke test（4-bit NF4 量化）
+python experiments/preexp01/run_qwen_baseline.py --sample-size 5
+```
+
+输出目录：`artifacts/preexp01/qwen_baseline_smoke/`
+- `predictions.jsonl`：逐条保存 `sample_index` / `sample_key` / `uid` /
+  `raw_output` / `parsed_output` / `memory` / `diagnosis` / `reason` /
+  `strategy` / `content` / `parse_success` / `parse_error` /
+  `input_token_count` / `output_token_count` / `elapsed_seconds`；每完成一条
+  即 append 写入，已存在的 `sample_key` 会自动跳过，中途异常不会丢失已完成的结果。
+- `run_config.json`：模型名、量化方式、compute dtype、解码方式（greedy）、
+  `max_new_tokens`、`sample_size`、`start_index`、数据集、LongTutor commit、
+  torch/transformers/bitsandbytes 版本、CUDA 是否可用、GPU 名称与显存、运行时间。
+- `run.log`：逐条记录第几条 / 是否成功 / 输入输出 token 数 / 耗时 / parse 是否成功
+  （不会把完整历史文本重复打印进日志）。
+
+如果本机没有 CUDA GPU 或 bitsandbytes 不可用，脚本会给出明确报错并退出，
+**不会**自动退回 CPU 加载 7B 模型。若只是想在没有 GPU 的机器上检查脚本逻辑
+（数据读取 / prompt 构造 / sample key 对齐 / 输出目录），可加 `--dry-run`
+（不下载、不加载任何模型）：
+
+```bash
+python experiments/preexp01/run_qwen_baseline.py --dry-run
+```
+
+### 本地（无 GPU）已完成的检查
+
+- `python -m py_compile experiments/preexp01/run_qwen_baseline.py`：语法检查通过。
+- `python experiments/preexp01/run_qwen_baseline.py --help`：参数与 import 路径正常（未安装 torch 的环境下也能正常导入，因为 torch/transformers/bitsandbytes 只在真正推理时才被 import）。
+- `--dry-run --sample-size 5 --start-index 0`：成功读取前 5 条样本，逐条与 `human_an_updated.jsonl` 按官方 sample key 对齐成功（5/5），prompt 构造正常（system prompt 约 2093 字符，user prompt 约 3.2-3.5 万字符，取决于历史长度）。
+- 故意移走 `history_features_lastq.jsonl` 后运行：按预期报错并提示运行 `prepare_longtutor_gold.py`，未静默重新生成。
+- 输出目录 `artifacts/preexp01/qwen_baseline_smoke/` 的创建、`run.log` 写入均验证正常。
+
+以下内容**必须在 Colab GPU 上才能确认**：4-bit 量化模型是否能在 T4 15GB 显存内成功加载、真实生成内容与耗时、`bitsandbytes`/CUDA 版本兼容性、5 条样本的 `parse_success` 实际情况。
+
 ---
 
 *本文档由脚本与数据的实际读取结果整理，未凭空猜测字段名。*
