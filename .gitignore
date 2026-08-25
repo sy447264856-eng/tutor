@@ -1,0 +1,17 @@
+# Python 虚拟环境
+.venv/
+__pycache__/
+*.pyc
+
+# 可由脚本重复生成的大型中间数据文件（不进 git，但目录下的检查报告/README 需保留）
+artifacts/**/*.jsonl
+artifacts/**/*.csv
+artifacts/**/*.parquet
+
+# 正式实验的最终结果不受上面规则误伤：显式加回白名单
+!artifacts/**/data_check.json
+!artifacts/**/*_metrics.json
+!artifacts/**/*_summary.json
+
+# 系统/编辑器杂项
+.DS_Store

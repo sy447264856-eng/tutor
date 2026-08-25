@@ -1,0 +1,63 @@
+{
+  "generated_count": 3437,
+  "gold_count": 1000,
+  "matched_gold_count": 1000,
+  "unmatched_gold_count": 0,
+  "duplicate_key_count": 0,
+  "first1000_internal_duplicate_count": 0,
+  "first1000_vs_gold_exact_set_equal": true,
+  "sequence_length_check": {
+    "expected": 200,
+    "all_equal_200": true,
+    "distinct_lengths_seen": [
+      200
+    ]
+  },
+  "history_length_check": {
+    "expected": 199,
+    "all_equal_199": true,
+    "distinct_lengths_seen": [
+      199
+    ]
+  },
+  "current_question_is_last_item_check": {
+    "checked_count": 3437,
+    "mismatched_count": 0,
+    "mismatched_uids_sample": []
+  },
+  "positional_vs_key_correspondence": {
+    "positional_uid_match_count": 1000,
+    "key_based_full_match": true,
+    "positional_full_match": true,
+    "conflict_detected": false
+  },
+  "recent_k_used": 20,
+  "recent_k_note": "build_history_features 的函数签名默认值为 20；官方 README/__main__ 仅为 MOOCRadar 显式指定 recent_k=10，未对 XES3G5M 给出专门取值，因此这里沿用函数默认值 20，不做猜测性覆盖。",
+  "sample_preview": {
+    "field_names": [
+      "features",
+      "history_info",
+      "question_info",
+      "related_history",
+      "uid"
+    ],
+    "uid": "8572",
+    "question_info_preview": "[450]\n单选: 下图是一个平行四边形，这个平行四边形的面积是（ ）平方厘米． question_450-image_0\nA: $$10$$; B: $$20$$; C: $$30$$; D: $$40$$\n知识点: 几何模块, 直线型, 图形认知, 图形认知平行四边形, 平行四边形的面积公式, 平行四边形, 空间与图形, 几何图形, 四边形, 公式法求平行四边形面积\n时间: 2021-05-2",
+    "history_info_count": 199,
+    "related_history_count": 7,
+    "features": {
+      "overall_acc": 0.65,
+      "related_concept_acc": 0.29,
+      "related_concept_count": 7,
+      "related_last_correct_interval_days": 6,
+      "related_last_correct_question_info": "[1366]\n填空: 如图，在平行四边形$$ABCD$$中，$$AE$$垂直$$BC$$于点$$E$$，$$AF$$垂直$$CD$$于点$$F$$，$$BC=12$$厘米，$$AE=6$$厘米，$$CD=9$$厘米 ．那么线段$$AF$$是厘米． question_1366-image_0\n知识点: 几何模块, 直线型, 图形认知, 图形认知平行四边形, 平行四边形的面积公式, 平行四边形\n时间: 2021-05-22T12:40:53\n结果: 正确",
+      "recent_acc": 0.7,
+      "recent_count": 20,
+      "cur_question_error_rate": 0.15
+    },
+    "_sample_key": "8572||4a7d36d788845c983528abe193c9fd6d7f629545b8ef6aa7e605ad12d6dde0db"
+  },
+  "longtutor_commit": "ba40af3b9e976f5960c42a15a645c0e9c3a7d718",
+  "generated_at": "2026-08-25T04:40:21.240695+00:00",
+  "output_path": "artifacts/preexp01/history_features_lastq.jsonl"
+}
