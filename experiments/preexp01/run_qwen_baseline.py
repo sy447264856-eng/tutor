@@ -46,6 +46,7 @@ import logging
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -156,15 +157,29 @@ def _setup_logging(log_path: Path) -> logging.Logger:
     return logger
 
 
-def _load_existing_keys(predictions_path: Path) -> set:
-    done = set()
+def _load_resume_state(predictions_path: Path):
+    """区分成功与失败样本，用于断点重跑：
+
+    - `parse_success=true` 的样本视为已完成，跳过；
+    - 之前失败（没有 raw_output / parse_success=false）的样本允许重跑，
+      且不会保留在文件里累积——重跑前会用只含成功样本的干净版本重写
+      predictions.jsonl，避免同一个 sample_key 反复堆积失败记录。
+
+    返回 (success_keys, kept_rows)。
+    """
+    success_keys = set()
+    kept_rows = []
     if not predictions_path.exists():
-        return done
+        return success_keys, kept_rows
     for row in _iter_jsonl(predictions_path):
         k = row.get("sample_key")
-        if k:
-            done.add(k)
-    return done
+        if not k:
+            continue
+        if row.get("parse_success"):
+            success_keys.add(k)
+            kept_rows.append(row)
+        # 失败记录（parse_success 非 true）不保留，允许下次重跑重新生成
+    return success_keys, kept_rows
 
 
 def load_model_and_tokenizer(model_name: str, logger: logging.Logger):
@@ -212,38 +227,63 @@ def load_model_and_tokenizer(model_name: str, logger: logging.Logger):
     return model, tokenizer, gpu_name, total_mem_gb
 
 
-def generate_local(model, tokenizer, messages, max_new_tokens: int):
+def generate_local(model, tokenizer, messages, max_new_tokens: int, stage_tracker: dict):
+    """执行 apply_chat_template -> tokenize -> move_inputs -> generate -> decode。
+
+    每一步之前更新 stage_tracker["stage"]，这样如果中途抛异常，调用方可以从
+    stage_tracker 里读到"最后成功进入的阶段"，即 failed_stage。
+
+    与最初版本相比，这里把"渲染 chat template"和"tokenize 成张量"拆成了两步
+    （先 apply_chat_template(tokenize=False) 拿到渲染后的字符串，再用
+    tokenizer(...) 单独分词），而不是让 apply_chat_template 同时做
+    tokenize=True + return_tensors="pt"。这样 tokenizer(...) 的返回值就是
+    标准的 BatchEncoding（明确支持 `.to(device)` 和 `["input_ids"]`），
+    不必依赖对 apply_chat_template 返回类型的隐含假设。
+    """
     import torch
 
-    input_ids = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt"
-    ).to(model.device)
-    input_token_count = int(input_ids.shape[-1])
+    stage_tracker["stage"] = "apply_chat_template"
+    rendered_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
+    stage_tracker["stage"] = "tokenize"
+    encoded = tokenizer(rendered_text, return_tensors="pt")
+
+    stage_tracker["stage"] = "move_inputs"
+    encoded = encoded.to(model.device)
+    input_token_count = int(encoded["input_ids"].shape[-1])
+
+    stage_tracker["stage"] = "generate"
     start = time.time()
     with torch.inference_mode():
         output_ids = model.generate(
-            input_ids,
+            **encoded,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
         )
     elapsed = time.time() - start
 
+    stage_tracker["stage"] = "decode"
     new_tokens = output_ids[0][input_token_count:]
     output_token_count = int(new_tokens.shape[-1])
     raw_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return raw_text, input_token_count, output_token_count, elapsed
 
 
-def process_one_sample_local(model, tokenizer, sample: dict, test_obj: dict, max_new_tokens: int) -> dict:
+def process_one_sample_local(
+    model, tokenizer, sample: dict, test_obj: dict, max_new_tokens: int, stage_tracker: dict
+) -> dict:
+    stage_tracker["stage"] = "build_prompt"
     mem_queries = official_extract_mem_queries(test_obj)
     # 与官方 process_one_sample 默认调用完全一致：history_mode="long", use_feature=False, use_teach=False
     system_prompt, user_prompt = official_build_prompts(sample, test_obj)
     messages = build_messages(system_prompt=system_prompt, user_prompt=user_prompt)
 
-    raw_text, in_tok, out_tok, elapsed = generate_local(model, tokenizer, messages, max_new_tokens)
+    raw_text, in_tok, out_tok, elapsed = generate_local(model, tokenizer, messages, max_new_tokens, stage_tracker)
 
+    stage_tracker["stage"] = "parse_output"
     parse_success = False
     parse_error = None
     parsed_output = None
@@ -282,6 +322,7 @@ def process_one_sample_local(model, tokenizer, sample: dict, test_obj: dict, max
         "content": content,
         "parse_success": parse_success,
         "parse_error": parse_error,
+        "failed_stage": None,
         "input_token_count": in_tok,
         "output_token_count": out_tok,
         "elapsed_seconds": round(elapsed, 3),
@@ -348,9 +389,17 @@ def main() -> int:
     except Exception:
         bnb_version = None
 
-    done_keys = _load_existing_keys(predictions_path)
-    if done_keys:
-        logger.info(f"检测到已有 predictions.jsonl，其中 {len(done_keys)} 条 sample_key 已完成，将跳过")
+    success_keys, kept_rows = _load_resume_state(predictions_path)
+    if predictions_path.exists():
+        n_prev = sum(1 for _ in _iter_jsonl(predictions_path))
+        n_dropped = n_prev - len(kept_rows)
+        with predictions_path.open("w", encoding="utf-8") as f_clean:
+            for row in kept_rows:
+                f_clean.write(json.dumps(row, ensure_ascii=False) + "\n")
+        logger.info(
+            f"重跑前整理 predictions.jsonl：保留 {len(kept_rows)} 条已成功样本（将跳过），"
+            f"移除 {n_dropped} 条失败记录（将重跑，不再累积旧的失败结果）"
+        )
 
     n_total = len(samples)
     n_done = n_success = n_fail = 0
@@ -360,9 +409,10 @@ def main() -> int:
             key = official_sample_key(sample)
             uid = sample.get("uid")
 
-            if key in done_keys:
-                logger.info(f"[{n_done + 1}/{n_total}] index={idx} uid={uid} 已存在于 predictions.jsonl，跳过")
+            if key in success_keys:
+                logger.info(f"[{n_done + 1}/{n_total}] index={idx} uid={uid} 已成功完成，跳过")
                 n_done += 1
+                n_success += 1
                 continue
 
             test_obj = tests_map.get(key)
@@ -372,8 +422,11 @@ def main() -> int:
                 n_fail += 1
                 continue
 
+            stage_tracker = {"stage": "init"}
             try:
-                result = process_one_sample_local(model, tokenizer, sample, test_obj, args.max_new_tokens)
+                result = process_one_sample_local(
+                    model, tokenizer, sample, test_obj, args.max_new_tokens, stage_tracker
+                )
                 row = {
                     "sample_index": idx,
                     "sample_key": key,
@@ -382,6 +435,8 @@ def main() -> int:
                 }
                 success = bool(result["parse_success"])
             except Exception as e:
+                tb = traceback.format_exc()
+                failed_stage = stage_tracker.get("stage", "unknown")
                 row = {
                     "sample_index": idx,
                     "sample_key": key,
@@ -394,13 +449,18 @@ def main() -> int:
                     "strategy": None,
                     "content": None,
                     "parse_success": False,
-                    "parse_error": f"exception:{type(e).__name__}:{e}",
+                    "parse_error": f"{type(e).__name__}: {e}",
+                    "failed_stage": failed_stage,
                     "input_token_count": None,
                     "output_token_count": None,
                     "elapsed_seconds": None,
                 }
                 success = False
-                logger.exception(f"[{n_done + 1}/{n_total}] index={idx} uid={uid} 处理失败")
+                logger.error(
+                    f"[{n_done + 1}/{n_total}] index={idx} uid={uid} sample_key={key} "
+                    f"failed_stage={failed_stage} {type(e).__name__}: {e}"
+                )
+                logger.error(f"完整 traceback (index={idx} uid={uid}):\n{tb}")
 
             f_out.write(json.dumps(row, ensure_ascii=False) + "\n")
             f_out.flush()
