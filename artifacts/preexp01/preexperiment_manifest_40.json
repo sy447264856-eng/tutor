@@ -1,0 +1,295 @@
+{
+  "seed": 2026,
+  "per_class": 10,
+  "total_count": 40,
+  "class_counts": {
+    "Recall Failure": 10,
+    "Conceptual Gap": 10,
+    "Procedural Error": 10,
+    "Transfer Deficit": 10
+  },
+  "source_gold_path": "/Users/dxm/Downloads/tutor/third_party/LongTutor/data/XES3G5M/human_an_updated.jsonl",
+  "longtutor_commit": "ba40af3b9e976f5960c42a15a645c0e9c3a7d718",
+  "samples": [
+    {
+      "sample_index": 109,
+      "sample_key": "7603||c57408dc7a84a7cafda7650e136beb0530647d872afe191181d045cf081bc4ca",
+      "uid": "7603",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 134,
+      "sample_key": "2249||f2c6a626a37629f68b162713ba994f854d6b4a5456083a2ccebf0fab957533de",
+      "uid": "2249",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 268,
+      "sample_key": "16535||eb9ae0af39dbf179a28ef368882de26fe250ea3ce22ec84a8d0dda03cb21beb9",
+      "uid": "16535",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 380,
+      "sample_key": "15414||439fa638281fc82fece2c63a7531b9a5caafb6e9fb5f69aa92ef03e6bdfb9973",
+      "uid": "15414",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 621,
+      "sample_key": "11000||5510a783e8d28b90bbf0e49387607090002bd934b375dbb43502e32f679529c5",
+      "uid": "11000",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 635,
+      "sample_key": "9632||08214f50ff979ffbe44fddde7c5766723ca3646a7645e0c22eb38c9b10286227",
+      "uid": "9632",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 684,
+      "sample_key": "13230||7ef923050cbdf291571cc178d4ef79fb15be3db7713d68a2eda33b437c5514c9",
+      "uid": "13230",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 752,
+      "sample_key": "1953||cdc4057d137861871d53f617400e76591dd50ced57c2472e1ae60fbf2af8f325",
+      "uid": "1953",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 776,
+      "sample_key": "17731||e9c4f60bfe521fe2b6d314a228db21707c67bfd06bca8c167bf63a65d9804f9c",
+      "uid": "17731",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 803,
+      "sample_key": "14509||d360af142b8b589b358ff3bbb441cc34c10094b13e230929d7fd8e62ddd9b384",
+      "uid": "14509",
+      "gold_diagnosis": "Recall Failure",
+      "gold_strategy": "Retrieval Practice"
+    },
+    {
+      "sample_index": 0,
+      "sample_key": "8572||4a7d36d788845c983528abe193c9fd6d7f629545b8ef6aa7e605ad12d6dde0db",
+      "uid": "8572",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 107,
+      "sample_key": "12502||10f9f46a8bc6543ecc32e03e27217c818101187091a209231d6a5926bf53dc0f",
+      "uid": "12502",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 341,
+      "sample_key": "12505||848d779743591359e88b0723393767720364ad14a0b557aaf7acd9d2bf068c3c",
+      "uid": "12505",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 601,
+      "sample_key": "8866||1b4851176967980a112d73e86c592db9a1b5b10b5f0cd2e6cdd7b201256b604d",
+      "uid": "8866",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 629,
+      "sample_key": "11970||92396d96783210bcc420b13fa06fbf11d0d2b6a2a381b082c2f6962eaf037e5d",
+      "uid": "11970",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 694,
+      "sample_key": "2819||27a328a6d832bc019ca8a82444581c79e7fe14a97a1c7a1488bec3736a98b9a5",
+      "uid": "2819",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 772,
+      "sample_key": "7161||e3f02480877a9348c6b8d567d7773a00f5765adcd6c82290a22d12b700d2a3a0",
+      "uid": "7161",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 806,
+      "sample_key": "14106||917df8a3f759427bd097e513395769f0b4be593114bede8d2e38b58b48e737d0",
+      "uid": "14106",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 824,
+      "sample_key": "1271||56e14b0e02bc040b5af8547c2b8447fa570d6593ecff5e88185ae20144f3bc7c",
+      "uid": "1271",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 867,
+      "sample_key": "6393||eb72c3a7fc22074687c6c07263830da02d618dc02057f2b51f6c1eeb5c8f2b5a",
+      "uid": "6393",
+      "gold_diagnosis": "Conceptual Gap",
+      "gold_strategy": "Conceptual Explanation"
+    },
+    {
+      "sample_index": 7,
+      "sample_key": "17309||3f31cce6f84fb45473bffa905ed05376cf95bafb865c69562eb1cd1be1a4e8a9",
+      "uid": "17309",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 118,
+      "sample_key": "2547||4f754e398ff54025d3a6f67d8c9d2cf9777b4cb2d0f63f661f8af4497675716f",
+      "uid": "2547",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 130,
+      "sample_key": "10528||d5b737fd323406571d5b769e0118619bd21184b575fb48be094932df2b0cf61c",
+      "uid": "10528",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 313,
+      "sample_key": "11742||26d58278ef305447bd5daf58a7286f04f70a372c1d0a622b74cef68b3705b556",
+      "uid": "11742",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 471,
+      "sample_key": "8106||6e8dc69a5e172b63d536301f43ddde12db53164e4355d1adc5e20216b2e0697b",
+      "uid": "8106",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 503,
+      "sample_key": "13767||fefdcebf54d026b08d98c0095435ffb1c938e3107fbf1514352e583588965143",
+      "uid": "13767",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 697,
+      "sample_key": "17388||8a1df9d27359434961eda7e9eebd3833150a7fe80105fafae461f8a85daeba7f",
+      "uid": "17388",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 822,
+      "sample_key": "9795||064a07ff5f698c91895228106555b3230eb3958d839a9ffed07d47d0028c2a50",
+      "uid": "9795",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 827,
+      "sample_key": "6422||d9c35e95fb5dd1376bddd476abfa1042dd4492fd3ffac8821777d3129fb80b8c",
+      "uid": "6422",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 900,
+      "sample_key": "8624||86f92ff9b1bec1dd92deb49555046dc12fb12211c576f53330e12ec61d3d5707",
+      "uid": "8624",
+      "gold_diagnosis": "Procedural Error",
+      "gold_strategy": "Stepwise Scaffolding"
+    },
+    {
+      "sample_index": 162,
+      "sample_key": "16543||8fac33253206826578416729a7cc99c23d4bc8ea9bc13f4ae5093c24e8012d31",
+      "uid": "16543",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 238,
+      "sample_key": "4045||c855bcc763555a52744c50d5f0e70ad1c61437c273b70061b3037fb183dfc0dc",
+      "uid": "4045",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 292,
+      "sample_key": "6083||6d76d03858695be23e97edfdf15257f4c95a1427d3eb6bfd2d2455da258785f5",
+      "uid": "6083",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 342,
+      "sample_key": "4908||eaf6c0f6423923c182f1bbb866b41322930ead9b4104e0d0a264a4ad40322bd3",
+      "uid": "4908",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 349,
+      "sample_key": "1223||0a6f93a2e89cd4409bed7e172738d0501a4a721baa15408ad70f8a1ed99f3f87",
+      "uid": "1223",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 364,
+      "sample_key": "16586||d0c1bcffc57e35b7b9beef716b7884f4ec3ccfde21600aa7ec890258eb9e9e2f",
+      "uid": "16586",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 398,
+      "sample_key": "13666||104b932c49b628177ad1e05e7e65b6ace632cbbf6c02d636bc9d486ba97f4004",
+      "uid": "13666",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 611,
+      "sample_key": "11061||dc253c7cf25326c3e94999630b9e8aad0da5225b31bc89b3e9a7bfed1ee01b50",
+      "uid": "11061",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 832,
+      "sample_key": "11579||c1472203a402e8a2d57c82aa2889ade814b8060855bef321158aa71057db59f5",
+      "uid": "11579",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    },
+    {
+      "sample_index": 918,
+      "sample_key": "4297||64b82d0e9862f89404e3e0369af935a7ab78c8eb2bb247e20b1d0caf614229cc",
+      "uid": "4297",
+      "gold_diagnosis": "Transfer Deficit",
+      "gold_strategy": "Analogical Transfer"
+    }
+  ]
+}
