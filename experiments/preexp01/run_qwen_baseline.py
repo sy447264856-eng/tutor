@@ -318,6 +318,116 @@ def limit_history(sample: dict, history_length: int):
     return limited_sample, original_count, len(used_history)
 
 
+# 支持的实验 condition。"baseline" 是原有行为（不启用官方 Teaching
+# Guidelines、不注入 Gold 状态），保证不传 --condition 时完全向后兼容。
+# "gold_state_teach_greedy" 是本次新增的固定配方：最近 history_length 条历史
+# + 当前错题 + Gold Diagnosis + Gold Teaching Strategy + 官方 Teaching
+# Guidelines（use_teach=True）+ 贪心解码；不提供 Gold reason/content/memory
+# answer，模型自己生成最终 teaching content。这两个变量（use_teach /
+# gold_state_injected）只由 condition 决定，不额外开放成独立的命令行开关，
+# 避免下游 Decoder 对比实验里出现"记不清这次到底组合了哪些设置"的问题。
+CONDITIONS = ("baseline", "gold_state_teach_greedy")
+
+
+def condition_flags(condition: str):
+    """返回 (use_teach, gold_state_injected)。"""
+    if condition == "gold_state_teach_greedy":
+        return True, True
+    return False, False
+
+
+def build_gold_state_block(gold_diagnosis, gold_strategy) -> str:
+    """最小的 Gold State 控制块，附加在官方 user_prompt 之后（不改动官方
+    Prompt 主体本身）。只给出 diagnosis 和 strategy 两个变量，不解释"为什么"
+    （不含 Gold reason），不给结论内容（不含 Gold content/memory answer），
+    并明确告诉模型这两个状态已经给定、生成教学时必须遵循、不要重新改判。
+    """
+    return (
+        "### PROVIDED STUDENT STATE\n"
+        f"Gold Diagnosis: {gold_diagnosis}\n"
+        f"Gold Teaching Strategy: {gold_strategy}\n"
+        "The diagnosis and strategy above are already determined and given to you as ground truth "
+        "for this student and this question. Do not re-diagnose the student or change the strategy. "
+        "In your output JSON, set \"diagnosis\" and \"strategy\" to exactly these given values, and "
+        "generate \"content\" (and \"memory\"/\"reason\") according to the official output format, "
+        "executing the given strategy's teaching action yourself."
+    )
+
+
+def audit_prompt_leakage(system_prompt: str, user_prompt: str, test_obj: dict) -> dict:
+    """检查 Gold reason / Gold content / Gold memory answers 的完整文本是否
+    原样出现在了最终 Prompt（system_prompt + user_prompt）里。只用于 dry-run
+    阶段的人工审计，不参与真实推理逻辑，不修改 Prompt。
+
+    "Unknown" 这种占位答案被排除在外：它不包含任何真实信息，即使巧合出现在
+    Prompt 别处也不构成信息泄漏，纳入检查只会制造无意义的误报。
+    """
+    full_prompt = f"{system_prompt}\n{user_prompt}"
+
+    gold_reason = test_obj.get("reason")
+    reason_leaked = bool(gold_reason) and gold_reason in full_prompt
+
+    gold_content = test_obj.get("content")
+    content_leaked = bool(gold_content) and gold_content in full_prompt
+
+    leaked_answers = []
+    for item in (test_obj.get("memory") or []):
+        if not isinstance(item, dict):
+            continue
+        answer = item.get("answer")
+        if answer and answer != "Unknown" and answer in full_prompt:
+            leaked_answers.append(answer)
+
+    return {
+        "gold_reason_leaked": reason_leaked,
+        "gold_content_leaked": content_leaked,
+        "gold_memory_answers_leaked": leaked_answers,
+        "any_leak": reason_leaked or content_leaked or bool(leaked_answers),
+    }
+
+
+def load_manifest(manifest_path: Path) -> dict:
+    with manifest_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_manifest_samples(manifest_path: Path, features_path: Path, limit):
+    """按 manifest 里记录的 sample_index 精确取出对应的
+    history_features_lastq.jsonl 行，严格保持 manifest 的固定顺序（不是文件里
+    的行序，不做任何重新排序），不使用 start_index/sample_size 的连续切片逻辑。
+
+    manifest 的 sample_index 与 history_features_lastq.jsonl 的行号是同一个
+    坐标系——这一点已经在 preexp01 的数据一致性检查里验证过：两者的前 1000
+    行按位置严格一一对应。
+
+    返回 (ordered_samples, missing_indices, manifest_dict)，其中
+    ordered_samples 是 [(sample_index, feature_row, manifest_entry), ...]。
+    """
+    manifest = load_manifest(manifest_path)
+    entries = manifest.get("samples", [])
+    if limit is not None and limit > 0:
+        entries = entries[:limit]
+
+    needed_indices = {e["sample_index"] for e in entries}
+    rows_by_index = {}
+    for i, obj in enumerate(_iter_jsonl(features_path)):
+        if i in needed_indices:
+            rows_by_index[i] = obj
+        if len(rows_by_index) == len(needed_indices):
+            break
+
+    ordered = []
+    missing = []
+    for e in entries:
+        idx = e["sample_index"]
+        row = rows_by_index.get(idx)
+        if row is None:
+            missing.append(idx)
+            continue
+        ordered.append((idx, row, e))
+    return ordered, missing, manifest
+
+
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=(
@@ -344,6 +454,19 @@ def build_argparser() -> argparse.ArgumentParser:
                      help="auto：不干预，使用 PyTorch SDPA 默认调度；"
                           "efficient：在 model.generate() 外层用 torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION) "
                           "强制只允许 memory-efficient attention backend，其他 backend 不可用时会明确报错，不会静默退回 math backend")
+    ap.add_argument("--manifest", type=str, default=None,
+                     help="固定样本清单 JSON 路径（如 preexperiment_manifest_40.json）。提供后按"
+                          "manifest['samples'] 里记录的 sample_index 精确选取样本、严格保持 manifest 的"
+                          "固定顺序，不再使用 --start-index/--sample-size 的连续切片逻辑。不提供本参数时，"
+                          "现有行为（--start-index/--sample-size）完全不变。")
+    ap.add_argument("--manifest-limit", type=int, default=None,
+                     help="只取 manifest 里前 N 条（用于先做 smoke test），默认不限制、取全部")
+    ap.add_argument("--condition", type=str, choices=list(CONDITIONS), default="baseline",
+                     help="baseline（默认）：与原有行为完全一致，不启用官方 Teaching Guidelines、不注入"
+                          "Gold 状态。gold_state_teach_greedy：固定配方 = 最近 history_length 条历史 + "
+                          "当前错题 + Gold Diagnosis + Gold Teaching Strategy + 官方 Teaching Guidelines"
+                          "（use_teach=True）+ 贪心解码；不提供 Gold reason/content/memory answer，模型自己"
+                          "生成最终 teaching content。")
     ap.add_argument("--dry-run", action="store_true",
                      help="不加载模型、不做任何生成；只做数据读取/prompt构造/key对齐的静态检查"
                           "（用于没有 GPU 的环境，例如先在本机确认逻辑正确，再上 Colab 跑真实推理）")
@@ -632,10 +755,13 @@ def generate_local(
 
 def process_one_sample_local(
     model, tokenizer, sample: dict, test_obj: dict, max_new_tokens: int, stage_tracker: dict,
-    arch_info: dict, sdpa_backend: str, logger: logging.Logger, history_length: int,
+    arch_info: dict, sdpa_backend: str, logger: logging.Logger, history_length: int, condition: str,
 ) -> dict:
     stage_tracker["stage"] = "build_prompt"
     mem_queries = official_extract_mem_queries(test_obj)
+    use_teach, gold_state_injected = condition_flags(condition)
+    gold_diagnosis = test_obj.get("diagnosis")
+    gold_strategy = test_obj.get("strategy")
 
     limited_sample, original_history_records, used_history_records = limit_history(sample, history_length)
     # 也存进 stage_tracker：如果后面 generate 阶段异常（例如 OOM），main() 的
@@ -643,12 +769,20 @@ def process_one_sample_local(
     stage_tracker["history_counts"] = (original_history_records, used_history_records)
     logger.info(
         f"[history] uid={sample.get('uid')} original_history_records={original_history_records} "
-        f"used_history_records={used_history_records} history_length_arg={history_length}"
+        f"used_history_records={used_history_records} history_length_arg={history_length} "
+        f"condition={condition} use_teach={use_teach} gold_state_injected={gold_state_injected}"
     )
 
-    # 与官方 process_one_sample 默认调用完全一致：history_mode="long", use_feature=False, use_teach=False
-    # （只是喂进去的 sample 换成了按 --history-length 截取过 history_info 的版本）
-    system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj)
+    # 官方 process_one_sample 默认调用是 history_mode="long", use_feature=False,
+    # use_teach=False；这里只把 use_teach 换成按 condition 决定的值，官方
+    # Prompt 构造逻辑本身（_build_prompts 函数体）完全不改。
+    system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj, use_teach=use_teach)
+
+    if gold_state_injected:
+        # 只在官方 user_prompt 之后追加一个最小的 Gold State 控制块，不改动
+        # 官方 Prompt 主体；不注入 Gold reason/content/memory answer。
+        user_prompt = user_prompt + "\n\n" + build_gold_state_block(gold_diagnosis, gold_strategy)
+
     messages = build_messages(system_prompt=system_prompt, user_prompt=user_prompt)
 
     raw_text, in_tok, out_tok, elapsed = generate_local(
@@ -678,6 +812,9 @@ def process_one_sample_local(
         else:
             parse_error = err
 
+    diagnosis_follow_gold = (diagnosis == gold_diagnosis) if parse_success else None
+    strategy_follow_gold = (strategy == gold_strategy) if parse_success else None
+
     return {
         "raw_output": raw_text,
         "parsed_output": parsed_output,
@@ -697,18 +834,33 @@ def process_one_sample_local(
         "diagnostics": stage_tracker.get("diagnostics"),
         "original_history_records": original_history_records,
         "used_history_records": used_history_records,
+        "condition": condition,
+        "gold_diagnosis": gold_diagnosis,
+        "gold_strategy": gold_strategy,
+        "diagnosis_follow_gold": diagnosis_follow_gold,
+        "strategy_follow_gold": strategy_follow_gold,
+        "use_teach": use_teach,
+        "gold_state_injected": gold_state_injected,
+        "decoding_method": "greedy",
     }
 
 
-def run_dry_check(samples, tests_map, history_length: int, logger: logging.Logger) -> int:
+def run_dry_check(samples, tests_map, history_length: int, condition: str, output_dir: Path, logger: logging.Logger) -> int:
     """不加载模型的静态检查：数据读取 / sample key 对齐 / prompt 构造是否正常。
 
-    与正式推理路径（process_one_sample_local）共用同一个 limit_history 函数，
-    所以这里打印出的 original_history_records / used_history_records /
-    user_prompt_chars 反映的是真实会喂给模型的那份 prompt，不是仍然基于全量
-    199 条历史算出来的。全程不 import torch/transformers，不下载 tokenizer。
+    与正式推理路径（process_one_sample_local）共用同一个 limit_history /
+    official_build_prompts / build_gold_state_block 逻辑，所以这里打印出的
+    original_history_records / used_history_records / user_prompt_chars 以及
+    Gold State 注入结果，反映的是真实会喂给模型的那份 prompt。当 condition 是
+    gold_state_teach_greedy 时，额外做一次 Prompt 审计：逐项确认最近
+    history_length 条历史存在、当前题存在、Gold Diagnosis/Strategy 存在、官方
+    Teaching Guidelines 存在、以及自动 leakage audit（Gold reason/content/
+    memory answers 的完整文本不应出现在最终 Prompt 里）。全程不 import
+    torch/transformers，不下载 tokenizer，不调用任何模型。
     """
+    use_teach, gold_state_injected = condition_flags(condition)
     n_ok = 0
+    n_leak = 0
     for idx, sample in samples:
         key = official_sample_key(sample)
         test_obj = tests_map.get(key)
@@ -716,18 +868,64 @@ def run_dry_check(samples, tests_map, history_length: int, logger: logging.Logge
             logger.error(f"[dry-run] index={idx} uid={sample.get('uid')} 未在 human_an_updated.jsonl 中找到对应 key，跳过")
             continue
         mem_queries = official_extract_mem_queries(test_obj)
+        gold_diagnosis = test_obj.get("diagnosis")
+        gold_strategy = test_obj.get("strategy")
 
         limited_sample, original_history_records, used_history_records = limit_history(sample, history_length)
-        system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj)
+        system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj, use_teach=use_teach)
+
+        if gold_state_injected:
+            user_prompt = user_prompt + "\n\n" + build_gold_state_block(gold_diagnosis, gold_strategy)
+
         logger.info(
-            f"[dry-run] index={idx} uid={sample.get('uid')} sample_key={key} "
+            f"[dry-run] index={idx} uid={sample.get('uid')} sample_key={key} condition={condition} "
             f"original_history_records={original_history_records} used_history_records={used_history_records} "
             f"history_length_arg={history_length} mem_queries={len(mem_queries)} "
             f"system_prompt_chars={len(system_prompt)} user_prompt_chars={len(user_prompt)}"
         )
+
+        # 把完整最终 Prompt（system + user，含 Gold State 控制块）落盘，供人工逐项
+        # 审阅"最近 N 条历史 / 当前题 / Gold Diagnosis / Gold Strategy / 官方
+        # Teaching Guidelines 是否存在，Gold reason/content/memory answer 是否
+        # 不存在"，而不是只看字符数这种间接信号。
+        prompts_dir = output_dir / "dry_run_prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = prompts_dir / f"index_{idx}.txt"
+        with prompt_file.open("w", encoding="utf-8") as pf:
+            pf.write("===== SYSTEM PROMPT =====\n")
+            pf.write(system_prompt)
+            pf.write("\n\n===== USER PROMPT =====\n")
+            pf.write(user_prompt)
+        logger.info(f"[dry-run] index={idx} 完整 Prompt 已写入: {prompt_file}")
+
+        # ---- Prompt 审计：逐项确认 + 自动 leakage audit ----
+        current_question_present = bool(sample.get("question_info")) and sample["question_info"] in user_prompt
+        teaching_guidelines_present = "[Teaching Guidelines]" in system_prompt
+        gold_diagnosis_block_present = gold_state_injected and (f"Gold Diagnosis: {gold_diagnosis}" in user_prompt)
+        gold_strategy_block_present = gold_state_injected and (f"Gold Teaching Strategy: {gold_strategy}" in user_prompt)
+        leakage = audit_prompt_leakage(system_prompt, user_prompt, test_obj)
+
+        logger.info(
+            f"[audit] index={idx} history_present={used_history_records > 0} "
+            f"current_question_present={current_question_present} "
+            f"teaching_guidelines_present={teaching_guidelines_present} "
+            f"gold_diagnosis_block_present={gold_diagnosis_block_present} "
+            f"gold_strategy_block_present={gold_strategy_block_present} "
+            f"gold_reason_leaked={leakage['gold_reason_leaked']} "
+            f"gold_content_leaked={leakage['gold_content_leaked']} "
+            f"gold_memory_answers_leaked={leakage['gold_memory_answers_leaked']}"
+        )
+        if leakage["any_leak"]:
+            n_leak += 1
+            logger.error(f"[audit] index={idx} 检测到 Gold 信息泄漏到 Prompt 里！{leakage}")
+
         n_ok += 1
+
     logger.info(f"[dry-run] 完成，{n_ok}/{len(samples)} 条样本通过 key 对齐与 prompt 构造检查（未调用任何模型）")
-    return 0 if n_ok == len(samples) else 1
+    logger.info(f"[audit] leakage audit：{n_leak}/{n_ok} 条样本检测到 Gold 信息泄漏")
+    if n_ok != len(samples):
+        return 1
+    return 1 if n_leak > 0 else 0
 
 
 def main() -> int:
@@ -749,13 +947,38 @@ def main() -> int:
         )
         return 2
 
-    samples = _load_slice(FEATURES_PATH, args.start_index, args.sample_size)
+    manifest_meta = None
+    manifest_indices_by_index = {}
+    if args.manifest:
+        manifest_path = Path(args.manifest)
+        if not manifest_path.exists():
+            logger.error(f"未找到 manifest 文件: {manifest_path}")
+            return 2
+        manifest_samples, missing_indices, manifest_meta = load_manifest_samples(
+            manifest_path, FEATURES_PATH, args.manifest_limit
+        )
+        if missing_indices:
+            logger.error(
+                f"manifest 中有 {len(missing_indices)} 个 sample_index 在 "
+                f"{FEATURES_PATH.relative_to(REPO_ROOT)} 里找不到对应行: {missing_indices}"
+            )
+            return 2
+        samples = [(idx, row) for idx, row, _entry in manifest_samples]
+        manifest_indices_by_index = {idx: entry for idx, _row, entry in manifest_samples}
+        logger.info(
+            f"从 manifest={manifest_path} 精确选取 {len(samples)} 条样本"
+            f"（manifest 总条数={len(manifest_meta.get('samples', []))}，"
+            f"manifest-limit={args.manifest_limit}），保持 manifest 固定顺序，不使用连续切片逻辑"
+        )
+    else:
+        samples = _load_slice(FEATURES_PATH, args.start_index, args.sample_size)
+        logger.info(f"读取到 {len(samples)} 条待处理样本（start_index={args.start_index}, sample_size={args.sample_size}）")
+
     tests_map = official_load_tests_map(GOLD_PATH)
-    logger.info(f"读取到 {len(samples)} 条待处理样本（start_index={args.start_index}, sample_size={args.sample_size}）；"
-                f"Gold 测试用例共 {len(tests_map)} 条")
+    logger.info(f"Gold 测试用例共 {len(tests_map)} 条；本次 condition={args.condition}")
 
     if args.dry_run:
-        return run_dry_check(samples, tests_map, args.history_length, logger)
+        return run_dry_check(samples, tests_map, args.history_length, args.condition, output_dir, logger)
 
     run_started_at = datetime.now(timezone.utc).isoformat()
 
@@ -820,16 +1043,30 @@ def main() -> int:
                 n_fail += 1
                 continue
 
+            manifest_entry = manifest_indices_by_index.get(idx)
+            if manifest_entry is not None and (
+                manifest_entry.get("gold_diagnosis") != test_obj.get("diagnosis")
+                or manifest_entry.get("gold_strategy") != test_obj.get("strategy")
+            ):
+                logger.error(
+                    f"index={idx} uid={uid}: manifest 里记录的 gold_diagnosis/gold_strategy 与当前 Gold "
+                    f"文件里的不一致（manifest={manifest_entry.get('gold_diagnosis')}/"
+                    f"{manifest_entry.get('gold_strategy')}，当前 Gold="
+                    f"{test_obj.get('diagnosis')}/{test_obj.get('strategy')}），Gold 数据似乎变了，请核实"
+                )
+
             stage_tracker = {"stage": "init", "diagnostics": None, "history_counts": (None, None)}
+            manifest_sample_index = idx if args.manifest else None
             try:
                 result = process_one_sample_local(
                     model, tokenizer, sample, test_obj, args.max_new_tokens, stage_tracker,
-                    arch_info, args.sdpa_backend, logger, args.history_length,
+                    arch_info, args.sdpa_backend, logger, args.history_length, args.condition,
                 )
                 row = {
                     "sample_index": idx,
                     "sample_key": key,
                     "uid": uid,
+                    "manifest_sample_index": manifest_sample_index,
                     **result,
                 }
                 success = bool(result["parse_success"])
@@ -837,10 +1074,12 @@ def main() -> int:
                 tb = traceback.format_exc()
                 failed_stage = stage_tracker.get("stage", "unknown")
                 orig_hist, used_hist = stage_tracker.get("history_counts", (None, None))
+                use_teach, gold_state_injected = condition_flags(args.condition)
                 row = {
                     "sample_index": idx,
                     "sample_key": key,
                     "uid": uid,
+                    "manifest_sample_index": manifest_sample_index,
                     "raw_output": None,
                     "parsed_output": None,
                     "memory": None,
@@ -863,6 +1102,16 @@ def main() -> int:
                     # 即使 generate 阶段 OOM，这两个数也几乎总是已经算出来了。
                     "original_history_records": orig_hist,
                     "used_history_records": used_hist,
+                    # test_obj 在异常发生前就已经取到，Gold 相关字段依然可以照常记录，
+                    # 不会因为 generate/parse 阶段的异常而丢失。
+                    "condition": args.condition,
+                    "gold_diagnosis": test_obj.get("diagnosis"),
+                    "gold_strategy": test_obj.get("strategy"),
+                    "diagnosis_follow_gold": None,
+                    "strategy_follow_gold": None,
+                    "use_teach": use_teach,
+                    "gold_state_injected": gold_state_injected,
+                    "decoding_method": "greedy",
                 }
                 success = False
                 logger.error(
@@ -901,6 +1150,13 @@ def main() -> int:
         # 逻辑，也不会丢掉"用户原始请求的是多少"这个信息。
         "history_length_requested": args.history_length,
         "history_length": args.history_length,
+        "condition": args.condition,
+        "use_teach": condition_flags(args.condition)[0],
+        "gold_state_injected": condition_flags(args.condition)[1],
+        "decoding_method": "greedy",
+        "manifest_path": str(Path(args.manifest).resolve()) if args.manifest else None,
+        "manifest_total_count": len(manifest_meta.get("samples", [])) if manifest_meta else None,
+        "manifest_limit": args.manifest_limit,
         "dataset": "XES3G5M / LongTutor-Gold (human_an_updated.jsonl) via history_features_lastq.jsonl",
         "longtutor_commit": _git_commit(LONGTUTOR_ROOT),
         "torch_version": torch.__version__,
