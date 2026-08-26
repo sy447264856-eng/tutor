@@ -134,6 +134,158 @@ def _align_memory(parsed: dict, mem_queries: list) -> list:
     return aligned
 
 
+# LaTeX 命令名称（不含反斜杠），仅用于消歧"这个反斜杠到底是不是 JSON 合法转义"。
+# 重点覆盖首字母恰好是 b/f/n/r/t 的命令——这几个字母本身也是合法的单字符 JSON
+# 转义（\b \f \n \r \t），只有这种情况才存在歧义（例如 \times 以 \t 开头，
+# json.loads 会把 \t 当成合法的 tab 转义，然后把 "imes" 当普通文本，不会报错，
+# 而是静默产生错误内容）。其余命令（如 \(、\div、\sqrt、\le、\ge 等）本来就
+# 不属于任何合法 JSON 转义，通用规则已经能正确处理，列在这里只是为了文档完整、
+# 方便以后扩展。
+_LATEX_COMMANDS = (
+    # 首字母与合法 JSON 单字符转义冲突，必须显式识别
+    "times", "tan", "to", "text", "tfrac", "theta", "triangle",
+    "frac", "forall",
+    "neq", "nabla", "notin", "ne",
+    "binom", "bigcup", "bigcap", "boxed", "bar", "because",
+    "rightarrow", "rfloor", "rceil", "rho",
+    # 首字母本身就不是合法 JSON 转义，通用规则已覆盖，这里仅作说明用途
+    "cdot", "div", "sqrt", "leq", "geq", "le", "ge", "pm", "approx",
+    "infty", "alpha", "beta", "pi", "sum", "int", "ast", "left", "right",
+    "mid", "vec", "overline", "underline", "begin", "end", "mathrm",
+    "dfrac", "circ", "angle", "perp", "parallel", "cong", "sim",
+)
+
+
+def repair_latex_json_escapes(json_str: str) -> str:
+    r"""在 JSON 字符串字面量内部，把"看起来像 LaTeX 命令、但对 json.loads 而言
+    是非法或有歧义转义"的反斜杠改成两个反斜杠（合法的字面反斜杠转义），使其
+    能被 json.loads 解析，且解析结果里的文本内容与模型原始输出的可见字符
+    完全一致（例如 `\\times` 修复前后解析出来的都还是文本 "\times"，只是从
+    "非法/有歧义转义" 变成了 "合法的字面反斜杠 + 普通字母"，不改变任何数学
+    语义）。
+
+    只处理**字符串字面量内部**的反斜杠；字符串外的 JSON 结构字符（大括号、
+    冒号、逗号等）原样保留，不做任何改动。
+
+    对每个反斜杠，按以下顺序判断：
+    1. 下一个字符是 `"` `\\` `/` —— 这三者不会是任何 LaTeX 命令的首字母，没有
+       歧义，是合法转义，原样保留。
+    2. 下一个字符是 `u` —— 检查后面是否紧跟 4 位十六进制数字：是则是合法的
+       `\\uXXXX` 转义，原样保留；不是（比如其实是 `\underline`）则不可能是
+       合法转义，转义这个反斜杠。
+    3. 下一个字符是 `b`/`f`/`n`/`r`/`t` —— 用 `_LATEX_COMMANDS` 检查从这个
+       反斜杠往后是否精确匹配一个已知 LaTeX 命令的前缀：匹配则判定为 LaTeX，
+       转义这个反斜杠（后面的字母作为普通字符，在循环的下一轮被原样保留，
+       不需要一次性跳过整个命令名）；不匹配则判定为模型确实想输出一个真实的
+       控制字符（退格/换页/换行/回车/制表符），原样保留，绝不重复处理。
+    4. 其他任何字符——一定不在合法 JSON 转义字符集 `" \\ / b f n r t u` 里，
+       转义这个反斜杠。这一条顺带处理了 `\\(` `\\)` `\\[` `\\]` `\\cdot`
+       `\\sqrt` `\\le` `\\ge` 等，不依赖上面的命令表也能正确处理。
+    """
+    out = []
+    i = 0
+    n = len(json_str)
+    in_string = False
+
+    while i < n:
+        c = json_str[i]
+
+        if not in_string:
+            out.append(c)
+            if c == '"':
+                in_string = True
+            i += 1
+            continue
+
+        if c == '"':
+            out.append(c)
+            in_string = False
+            i += 1
+            continue
+
+        if c != '\\':
+            out.append(c)
+            i += 1
+            continue
+
+        # c == '\\'，且当前处于字符串字面量内部
+        nxt = json_str[i + 1] if i + 1 < n else ''
+
+        if nxt in ('"', '\\', '/'):
+            out.append(json_str[i:i + 2])
+            i += 2
+            continue
+
+        if nxt == 'u':
+            hex_part = json_str[i + 2:i + 6]
+            if len(hex_part) == 4 and all(ch in '0123456789abcdefABCDEF' for ch in hex_part):
+                out.append(json_str[i:i + 6])
+                i += 6
+                continue
+            out.append('\\\\')
+            i += 1
+            continue
+
+        if nxt in ('b', 'f', 'n', 'r', 't'):
+            rest = json_str[i + 1:]
+            if any(rest.startswith(cmd) for cmd in _LATEX_COMMANDS):
+                out.append('\\\\')
+                i += 1
+                continue
+            out.append(json_str[i:i + 2])
+            i += 2
+            continue
+
+        # 其余任何字符都不在合法 JSON 转义字符集里
+        out.append('\\\\')
+        i += 1
+
+    return ''.join(out)
+
+
+def parse_model_json_output(raw_text):
+    """两步解析：第一步用官方 `extract_json` 原样解析 `raw_text`（不做任何
+    修改）；只有官方解析失败（抛异常 / 返回 None）时，才在原始文本上截取出
+    JSON 子串、执行 LaTeX 反斜杠修复，再解析一次。绝不会先修改 raw_text 再
+    调用官方解析。
+
+    返回 (parsed_or_None, parse_error_or_None, repair_applied: bool,
+          repair_type: Optional[str])。
+    - 官方解析成功：(parsed, None, False, None)。
+    - 官方解析失败、修复后解析成功：(parsed, None, True, "latex_json_escape")。
+    - 两步都失败：(None, 官方解析的原始错误信息, False, None) —— 按要求保留
+      的是"原始" parse_error，不会被 fallback 修复过程中的错误覆盖。
+    """
+    try:
+        parsed = extract_json(raw_text)
+    except Exception as e:
+        parsed = None
+        official_error = f"json_parse_error:{e}"
+    else:
+        official_error = None if parsed is not None else "json_parse_error:empty_or_unparseable"
+
+    if parsed is not None:
+        return parsed, None, False, None
+
+    if not raw_text:
+        return None, official_error, False, None
+
+    start = raw_text.find('{')
+    end = raw_text.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None, official_error, False, None
+
+    json_str = raw_text[start:end + 1]
+    repaired_str = repair_latex_json_escapes(json_str)
+
+    try:
+        repaired_parsed = json.loads(repaired_str)
+    except Exception:
+        return None, official_error, False, None
+
+    return repaired_parsed, None, True, "latex_json_escape"
+
+
 def limit_history(sample: dict, history_length: int):
     """在调用官方 `_build_prompts` 之前，把喂给 prompt 的 history_info 限制为
     最近 history_length 条。
@@ -505,18 +657,12 @@ def process_one_sample_local(
 
     stage_tracker["stage"] = "parse_output"
     parse_success = False
-    parse_error = None
     parsed_output = None
     memory = diagnosis = reason = strategy = content = None
 
-    try:
-        parsed = extract_json(raw_text)
-    except Exception as e:
-        parsed = None
-        parse_error = f"json_parse_error:{e}"
-
-    if parsed is None and parse_error is None:
-        parse_error = "json_parse_error:empty_or_unparseable"
+    # 两步解析：先官方 extract_json（不改动 raw_text），只有官方解析失败时
+    # 才在原始文本上做 LaTeX 反斜杠 fallback repair 再解析一次。
+    parsed, parse_error, parse_repair_applied, parse_repair_type = parse_model_json_output(raw_text)
 
     if parsed is not None:
         err = official_validate_output(parsed, expected_queries=mem_queries)
@@ -542,6 +688,8 @@ def process_one_sample_local(
         "content": content,
         "parse_success": parse_success,
         "parse_error": parse_error,
+        "parse_repair_applied": parse_repair_applied,
+        "parse_repair_type": parse_repair_type,
         "failed_stage": None,
         "input_token_count": in_tok,
         "output_token_count": out_tok,
@@ -702,6 +850,8 @@ def main() -> int:
                     "content": None,
                     "parse_success": False,
                     "parse_error": f"{type(e).__name__}: {e}",
+                    "parse_repair_applied": False,
+                    "parse_repair_type": None,
                     "failed_stage": failed_stage,
                     "input_token_count": None,
                     "output_token_count": None,
