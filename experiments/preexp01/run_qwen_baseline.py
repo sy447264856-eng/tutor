@@ -354,6 +354,43 @@ def build_gold_state_block(gold_diagnosis, gold_strategy) -> str:
     )
 
 
+def inject_gold_state_block(user_prompt: str, gold_diagnosis, gold_strategy):
+    """把 Gold State 控制块插入官方 user_prompt 的"### CURRENT QUESTION"段落
+    之后、"### MEMORY QUERIES"段落之前（如果本条样本有 memory queries；官方
+    `_build_prompts` 在 `mem_queries` 为空时不会生成这一段）。
+
+    官方 `_build_prompts` 内部用 `"\\n\\n".join(user_parts) + "\\n\\nAnalyze the
+    data and generate the JSON response."` 拼出最终字符串，本函数不改动
+    `_build_prompts` 本身，只是在它返回的这个已知拼接格式上做字符串定位与插入。
+
+    返回 (new_user_prompt, insertion_mode)，insertion_mode 取值：
+    - "before_memory_queries"：正常情况，插入到 MEMORY QUERIES 段落之前。
+    - "before_trailer_no_memory_queries"：本条样本没有 MEMORY QUERIES 段落，
+      插入到结尾的 "Analyze the data..." 提示语之前。
+    - "fallback_append_end"：官方文本格式与预期的拼接方式不符（说明官方代码
+      变了），退回到"追加在整段末尾"这种最安全的旧行为，不假装能精确定位，
+      也不让流水线中断；这种情况会被调用方记录下来，不会被静默吞掉。
+    """
+    trailer = "\n\nAnalyze the data and generate the JSON response."
+    block = build_gold_state_block(gold_diagnosis, gold_strategy)
+
+    if not user_prompt.endswith(trailer):
+        return user_prompt + "\n\n" + block, "fallback_append_end"
+
+    body = user_prompt[: -len(trailer)]
+    marker = "\n\n### MEMORY QUERIES"
+    marker_idx = body.find(marker)
+
+    if marker_idx == -1:
+        new_body = body + "\n\n" + block
+        mode = "before_trailer_no_memory_queries"
+    else:
+        new_body = body[:marker_idx] + "\n\n" + block + body[marker_idx:]
+        mode = "before_memory_queries"
+
+    return new_body + trailer, mode
+
+
 def audit_prompt_leakage(system_prompt: str, user_prompt: str, test_obj: dict) -> dict:
     """检查 Gold reason / Gold content / Gold memory answers 的完整文本是否
     原样出现在了最终 Prompt（system_prompt + user_prompt）里。只用于 dry-run
@@ -778,10 +815,20 @@ def process_one_sample_local(
     # Prompt 构造逻辑本身（_build_prompts 函数体）完全不改。
     system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj, use_teach=use_teach)
 
+    gold_state_insertion_mode = None
     if gold_state_injected:
-        # 只在官方 user_prompt 之后追加一个最小的 Gold State 控制块，不改动
-        # 官方 Prompt 主体；不注入 Gold reason/content/memory answer。
-        user_prompt = user_prompt + "\n\n" + build_gold_state_block(gold_diagnosis, gold_strategy)
+        # 把最小的 Gold State 控制块插入到"### CURRENT QUESTION"之后、
+        # "### MEMORY QUERIES"之前，不改动官方 Prompt 主体本身；不注入 Gold
+        # reason/content/memory answer。
+        user_prompt, gold_state_insertion_mode = inject_gold_state_block(
+            user_prompt, gold_diagnosis, gold_strategy
+        )
+        if gold_state_insertion_mode == "fallback_append_end":
+            logger.error(
+                f"uid={sample.get('uid')} 官方 user_prompt 的拼接格式与预期不符，"
+                "Gold State 控制块退回到追加在末尾（而不是插入到 CURRENT QUESTION 之后），"
+                "请检查 third_party/LongTutor 的 _build_prompts 是否发生了变化"
+            )
 
     messages = build_messages(system_prompt=system_prompt, user_prompt=user_prompt)
 
@@ -841,6 +888,7 @@ def process_one_sample_local(
         "strategy_follow_gold": strategy_follow_gold,
         "use_teach": use_teach,
         "gold_state_injected": gold_state_injected,
+        "gold_state_insertion_mode": gold_state_insertion_mode,
         "decoding_method": "greedy",
     }
 
@@ -861,6 +909,7 @@ def run_dry_check(samples, tests_map, history_length: int, condition: str, outpu
     use_teach, gold_state_injected = condition_flags(condition)
     n_ok = 0
     n_leak = 0
+    n_misplaced = 0
     for idx, sample in samples:
         key = official_sample_key(sample)
         test_obj = tests_map.get(key)
@@ -874,8 +923,16 @@ def run_dry_check(samples, tests_map, history_length: int, condition: str, outpu
         limited_sample, original_history_records, used_history_records = limit_history(sample, history_length)
         system_prompt, user_prompt = official_build_prompts(limited_sample, test_obj, use_teach=use_teach)
 
+        gold_state_insertion_mode = None
         if gold_state_injected:
-            user_prompt = user_prompt + "\n\n" + build_gold_state_block(gold_diagnosis, gold_strategy)
+            user_prompt, gold_state_insertion_mode = inject_gold_state_block(
+                user_prompt, gold_diagnosis, gold_strategy
+            )
+            if gold_state_insertion_mode == "fallback_append_end":
+                logger.error(
+                    f"[audit] index={idx} 官方 user_prompt 拼接格式与预期不符，"
+                    "Gold State 控制块退回到追加在末尾，而不是插入到 CURRENT QUESTION 之后"
+                )
 
         logger.info(
             f"[dry-run] index={idx} uid={sample.get('uid')} sample_key={key} condition={condition} "
@@ -905,16 +962,35 @@ def run_dry_check(samples, tests_map, history_length: int, condition: str, outpu
         gold_strategy_block_present = gold_state_injected and (f"Gold Teaching Strategy: {gold_strategy}" in user_prompt)
         leakage = audit_prompt_leakage(system_prompt, user_prompt, test_obj)
 
+        # 结构性确认：Gold State 控制块确实落在 "### CURRENT QUESTION" 之后、
+        # "### MEMORY QUERIES"（如果本条样本有）之前，而不只是"文本里存在"这种
+        # 弱检查。
+        idx_current_q = user_prompt.find("### CURRENT QUESTION")
+        idx_state_block = user_prompt.find("### PROVIDED STUDENT STATE")
+        idx_memory_q = user_prompt.find("### MEMORY QUERIES")
+        gold_state_positioned_correctly = (
+            gold_state_injected
+            and idx_current_q != -1
+            and idx_state_block != -1
+            and idx_current_q < idx_state_block
+            and (idx_memory_q == -1 or idx_state_block < idx_memory_q)
+        )
+
         logger.info(
             f"[audit] index={idx} history_present={used_history_records > 0} "
             f"current_question_present={current_question_present} "
             f"teaching_guidelines_present={teaching_guidelines_present} "
             f"gold_diagnosis_block_present={gold_diagnosis_block_present} "
             f"gold_strategy_block_present={gold_strategy_block_present} "
+            f"gold_state_insertion_mode={gold_state_insertion_mode} "
+            f"gold_state_positioned_correctly={gold_state_positioned_correctly} "
             f"gold_reason_leaked={leakage['gold_reason_leaked']} "
             f"gold_content_leaked={leakage['gold_content_leaked']} "
             f"gold_memory_answers_leaked={leakage['gold_memory_answers_leaked']}"
         )
+        if gold_state_injected and not gold_state_positioned_correctly:
+            n_misplaced += 1
+            logger.error(f"[audit] index={idx} Gold State 控制块没有落在 CURRENT QUESTION 之后/MEMORY QUERIES 之前！")
         if leakage["any_leak"]:
             n_leak += 1
             logger.error(f"[audit] index={idx} 检测到 Gold 信息泄漏到 Prompt 里！{leakage}")
@@ -923,9 +999,10 @@ def run_dry_check(samples, tests_map, history_length: int, condition: str, outpu
 
     logger.info(f"[dry-run] 完成，{n_ok}/{len(samples)} 条样本通过 key 对齐与 prompt 构造检查（未调用任何模型）")
     logger.info(f"[audit] leakage audit：{n_leak}/{n_ok} 条样本检测到 Gold 信息泄漏")
+    logger.info(f"[audit] Gold State 控制块位置检查：{n_misplaced}/{n_ok} 条样本没有落在 CURRENT QUESTION 之后/MEMORY QUERIES 之前")
     if n_ok != len(samples):
         return 1
-    return 1 if n_leak > 0 else 0
+    return 1 if (n_leak > 0 or n_misplaced > 0) else 0
 
 
 def main() -> int:
@@ -1111,6 +1188,7 @@ def main() -> int:
                     "strategy_follow_gold": None,
                     "use_teach": use_teach,
                     "gold_state_injected": gold_state_injected,
+                    "gold_state_insertion_mode": None,
                     "decoding_method": "greedy",
                 }
                 success = False
